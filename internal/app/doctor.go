@@ -45,7 +45,7 @@ func Doctor(ctx context.Context) DoctorResult {
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		result.Error = "guest Docker API unavailable: " + err.Error()
+		result.Error = "guest Docker API unavailable: " + guest.Failure(client, err)
 		result.ExitCode = 6
 		return result
 	}
@@ -60,7 +60,7 @@ func Doctor(ctx context.Context) DoctorResult {
 		APIVersion string `json:"ApiVersion"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&version); err != nil {
-		result.Error = "could not decode guest Docker version response: " + err.Error()
+		result.Error = guestVersionError(client, err)
 		result.ExitCode = 6
 		return result
 	}

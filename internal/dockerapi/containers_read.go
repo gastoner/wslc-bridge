@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 
+	"wslc-bridge/internal/guest"
+	"wslc-bridge/internal/logging"
 	"wslc-bridge/internal/native"
 	"wslc-bridge/internal/overlay"
 )
@@ -22,14 +24,14 @@ type guestContainerSummary struct {
 func (h *Handler) listContainers(w http.ResponseWriter, r *http.Request) {
 	response, err := h.doGuest(r.Context(), r)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "guest Docker API request failed: "+err.Error())
+		writeError(w, http.StatusBadGateway, "guest Docker API request failed: "+guest.Failure(h.guest, err))
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		copyResponseHeaders(w.Header(), response.Header)
 		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
+		copyGuestStream(w, r, response.Body)
 		return
 	}
 	body, err := readBounded(response.Body)
@@ -43,6 +45,9 @@ func (h *Handler) listContainers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, nativeListErr := h.native.ListContainers(r.Context())
+	if nativeListErr != nil {
+		logging.Errorf("native WSLC container list failed while listing containers: %v", nativeListErr)
+	}
 	nativeContainers := make(map[string]native.ContainerListItem, len(items))
 	for _, item := range items {
 		nativeContainers[normalizeContainerID(item.ID)] = item
@@ -74,6 +79,9 @@ func (h *Handler) listContainers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Content-Length")
 	w.Header().Del("Content-Encoding")
 	w.Header().Set("Content-Type", "application/json")
+	if nativeListErr != nil {
+		w.Header().Set(warningHeader, "WSLC container list failed; published Windows ports may be missing")
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, bytes.NewReader(transformed))
 }
@@ -86,14 +94,14 @@ func (h *Handler) inspectContainer(w http.ResponseWriter, r *http.Request, path 
 	}
 	response, err := h.doGuest(r.Context(), r)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "guest Docker API request failed: "+err.Error())
+		writeError(w, http.StatusBadGateway, "guest Docker API request failed: "+guest.Failure(h.guest, err))
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		copyResponseHeaders(w.Header(), response.Header)
 		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
+		copyGuestStream(w, r, response.Body)
 		return
 	}
 	body, err := readBounded(response.Body)
@@ -102,6 +110,7 @@ func (h *Handler) inspectContainer(w http.ResponseWriter, r *http.Request, path 
 		return
 	}
 	ports := make(map[string][]native.PortBinding)
+	var nativeListErr error
 	if items, listErr := h.native.ListContainers(r.Context()); listErr == nil {
 		for _, item := range items {
 			if normalizeContainerID(item.ID) == normalizeContainerID(id) {
@@ -109,6 +118,9 @@ func (h *Handler) inspectContainer(w http.ResponseWriter, r *http.Request, path 
 				break
 			}
 		}
+	} else {
+		nativeListErr = listErr
+		logging.Errorf("native WSLC container list failed while inspecting %s: %v", id, listErr)
 	}
 	transformed, err := overlay.Inspect(body, ports)
 	if err != nil {
@@ -119,6 +131,9 @@ func (h *Handler) inspectContainer(w http.ResponseWriter, r *http.Request, path 
 	w.Header().Del("Content-Length")
 	w.Header().Del("Content-Encoding")
 	w.Header().Set("Content-Type", "application/json")
+	if nativeListErr != nil {
+		w.Header().Set(warningHeader, "WSLC container list failed; published Windows ports may be missing")
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, bytes.NewReader(transformed))
 }
@@ -131,7 +146,7 @@ func (h *Handler) guestContainerRunning(r *http.Request, id string) (bool, int, 
 	}
 	response, err := h.guest.Do(inspectRequest)
 	if err != nil {
-		return false, http.StatusBadGateway, err
+		return false, http.StatusBadGateway, fmt.Errorf("%s", guest.Failure(h.guest, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {

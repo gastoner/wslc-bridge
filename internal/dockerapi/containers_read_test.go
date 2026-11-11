@@ -104,6 +104,25 @@ func TestInspectContainerFallsBackToGuestWhenWSLCListFails(t *testing.T) {
 	if binding := inspect.NetworkSettings.Ports["80/tcp"][0]; binding.HostIP != "" || binding.HostPort != "" {
 		t.Fatalf("guest VM port was incorrectly exposed as a Windows host port: %#v", binding)
 	}
+	if warning := response.Header().Get(warningHeader); warning == "" {
+		t.Fatal("a failed native port lookup must be reported to the client")
+	}
+}
+
+func TestListContainersWarnsWhenTheNativePortLookupFails(t *testing.T) {
+	guestBody := `[{"Id":"container-id","State":"running","Ports":[]}]`
+	guest := &http.Client{Transport: roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(guestBody))}, nil
+	})}
+	handler := NewHandler(&fakeNativeRuntime{listError: errors.New("native list unavailable")}, guest)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/containers/json", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("container list returned %d: %s", response.Code, response.Body.String())
+	}
+	if warning := response.Header().Get(warningHeader); !strings.Contains(warning, "ports may be missing") {
+		t.Fatalf("warning header = %q, want the missing-ports warning", warning)
+	}
 }
 
 func TestContainerStartUsesNativeStartDirectlyWithoutInspect(t *testing.T) {

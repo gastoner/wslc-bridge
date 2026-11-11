@@ -29,7 +29,7 @@ type networkCreateRequest struct {
 func (h *Handler) createNetwork(w http.ResponseWriter, r *http.Request) {
 	var request networkCreateRequest
 	if err := decodeRequest(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	if strings.TrimSpace(request.Name) == "" || !validNamePattern.MatchString(request.Name) {

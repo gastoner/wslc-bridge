@@ -2,6 +2,47 @@ package native
 
 import "testing"
 
+func TestSelectContainerIDIgnoresTrailingNonIDLines(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+		ok     bool
+	}{
+		{
+			name:   "single id",
+			output: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+			want:   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			ok:     true,
+		},
+		{
+			name:   "id followed by a warning",
+			output: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nwarning: image was pulled\n",
+			want:   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			ok:     true,
+		},
+		{
+			name:   "non hex output falls back to the last line",
+			output: "container-name\n",
+			want:   "container-name",
+			ok:     true,
+		},
+		{
+			name:   "empty output",
+			output: " \n\t\n",
+			ok:     false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := selectContainerID(test.output)
+			if ok != test.ok || got != test.want {
+				t.Fatalf("selectContainerID() = (%q, %v), want (%q, %v)", got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
 func TestDecodeContainerListSupportsArrayAndJSONLines(t *testing.T) {
 	tests := []struct {
 		name             string

@@ -22,12 +22,17 @@ const (
 	maxAge     = 15 * time.Minute
 )
 
+// FailedExitCode is reported for an exec that never produced an exit status, so
+// clients never mistake a failed exec for a successful one.
+const FailedExitCode = -1
+
 type Record struct {
 	ID          string     `json:"ID"`
 	ContainerID string     `json:"ContainerID"`
 	Cmd         []string   `json:"ProcessConfig,omitempty"`
 	State       State      `json:"-"`
 	ExitCode    *int       `json:"ExitCode,omitempty"`
+	Failure     string     `json:"-"`
 	CreatedAt   time.Time  `json:"-"`
 	FinishedAt  *time.Time `json:"-"`
 }
@@ -87,16 +92,21 @@ func (s *Store) Complete(id string, exitCode int) (Record, error) {
 	return record, nil
 }
 
-func (s *Store) Fail(id string) {
+func (s *Store) Fail(id string, cause error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[id]
 	if !ok {
 		return
 	}
+	exitCode := FailedExitCode
 	now := time.Now()
 	record.State = Failed
+	record.ExitCode = &exitCode
 	record.FinishedAt = &now
+	if cause != nil {
+		record.Failure = cause.Error()
+	}
 	s.records[id] = record
 }
 

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"wslc-bridge/internal/logging"
 )
 
 type registryAuth struct {
@@ -45,6 +47,7 @@ func (h *Handler) pullImage(w http.ResponseWriter, r *http.Request) {
 	// Use one encoder per record so each Docker progress object is flushed immediately.
 	writer := bufio.NewWriter(w)
 	if err := writeProgress(writer, flusher, map[string]string{"status": fmt.Sprintf("Pulling %s", reference)}); err != nil {
+		logging.Errorf("could not stream image pull progress for %s: %v", reference, err)
 		return
 	}
 	commandCtx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
@@ -52,10 +55,14 @@ func (h *Handler) pullImage(w http.ResponseWriter, r *http.Request) {
 	err := h.native.PullImage(commandCtx, reference)
 	if err != nil {
 		message := fmt.Sprintf("wslc image pull failed: %s", err.Error())
-		_ = writeProgress(writer, flusher, map[string]any{"error": message, "errorDetail": map[string]string{"message": message}})
+		if writeErr := writeProgress(writer, flusher, map[string]any{"error": message, "errorDetail": map[string]string{"message": message}}); writeErr != nil {
+			logging.Errorf("could not report the image pull failure for %s: %v", reference, writeErr)
+		}
 		return
 	}
-	_ = writeProgress(writer, flusher, map[string]any{"status": fmt.Sprintf("Downloaded %s", reference), "progressDetail": map[string]int{}})
+	if err := writeProgress(writer, flusher, map[string]any{"status": fmt.Sprintf("Downloaded %s", reference), "progressDetail": map[string]int{}}); err != nil {
+		logging.Errorf("could not finish the image pull progress for %s: %v", reference, err)
+	}
 }
 
 func writeProgress(writer *bufio.Writer, flusher http.Flusher, record any) error {

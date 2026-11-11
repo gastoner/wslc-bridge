@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"wslc-bridge/internal/buildinfo"
 	"wslc-bridge/internal/dockerapi"
 	"wslc-bridge/internal/guest"
+	"wslc-bridge/internal/logging"
 	"wslc-bridge/internal/native"
 	"wslc-bridge/internal/platform"
 )
@@ -42,7 +44,7 @@ func Serve(ctx context.Context, pipeName string) error {
 	}
 	versionResponse, err := guestClient.Do(versionRequest)
 	if err != nil {
-		return &ExitError{Code: 6, Message: "guest Docker API is unavailable: " + err.Error()}
+		return &ExitError{Code: 6, Message: "guest Docker API is unavailable: " + guest.Failure(guestClient, err)}
 	}
 	if versionResponse.StatusCode < 200 || versionResponse.StatusCode >= 300 {
 		_ = versionResponse.Body.Close()
@@ -53,7 +55,7 @@ func Serve(ctx context.Context, pipeName string) error {
 	}
 	if err := json.NewDecoder(versionResponse.Body).Decode(&guestVersion); err != nil {
 		_ = versionResponse.Body.Close()
-		return &ExitError{Code: 6, Message: "decode guest Docker version: " + err.Error()}
+		return &ExitError{Code: 6, Message: guestVersionError(guestClient, err)}
 	}
 	_ = versionResponse.Body.Close()
 	listener, err := platform.ListenPipe(pipeName)
@@ -88,17 +90,28 @@ func Serve(ctx context.Context, pipeName string) error {
 	case <-ctx.Done():
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer shutdownCancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			_ = server.Close()
-		}
+		shutdownErr := server.Shutdown(shutdownCtx)
 		tracker.closeHijacked()
 		_ = server.Close()
 		select {
 		case <-serveResult:
 		case <-time.After(2 * time.Second):
+			logging.Errorf("named-pipe server did not stop within the shutdown deadline")
+		}
+		if shutdownErr != nil {
+			return &ExitError{Code: 5, Message: "graceful shutdown failed: " + shutdownErr.Error()}
 		}
 		return nil
 	}
+}
+
+// guestVersionError describes a guest /version body that could not be decoded.
+// An empty body is reported as such instead of as a JSON EOF.
+func guestVersionError(client *http.Client, err error) string {
+	if errors.Is(err, io.EOF) {
+		return "guest Docker API returned an empty version response"
+	}
+	return "decode guest Docker version: " + guest.Failure(client, err)
 }
 
 type stdoutWriter struct{}

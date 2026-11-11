@@ -17,6 +17,9 @@ type Result struct {
 	Stdout   []byte
 	Stderr   []byte
 	ExitCode int
+	// Truncated reports that stdout or stderr exceeded MaxOutputBytes and the
+	// captured content is incomplete.
+	Truncated bool
 }
 
 type CommandError struct {
@@ -93,7 +96,7 @@ func (r *Runner) run(ctx context.Context, name string, args ...string) (Result, 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	result := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: 0}
+	result := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: 0, Truncated: stdout.truncated || stderr.truncated}
 	if err == nil {
 		return result, nil
 	}
@@ -108,9 +111,20 @@ func (r *Runner) run(ctx context.Context, name string, args ...string) (Result, 
 	return result, &CommandError{Name: name, Args: append([]string(nil), args...), ExitCode: result.ExitCode, Stderr: string(result.Stderr), Err: err}
 }
 
+// StderrOf returns the captured stderr of a failed command. Error classification
+// must look at the tool output only, never at the rendered error message.
+func StderrOf(err error) string {
+	var commandError *CommandError
+	if errors.As(err, &commandError) {
+		return commandError.Stderr
+	}
+	return ""
+}
+
 type limitedBuffer struct {
 	bytes.Buffer
-	limit int
+	limit     int
+	truncated bool
 }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {
@@ -119,10 +133,12 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	}
 	remaining := b.limit - b.Len()
 	if remaining <= 0 {
+		b.truncated = true
 		return len(p), nil
 	}
 	if len(p) > remaining {
 		_, _ = b.Buffer.Write(p[:remaining])
+		b.truncated = true
 		return len(p), nil
 	}
 	return b.Buffer.Write(p)

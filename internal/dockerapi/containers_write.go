@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"wslc-bridge/internal/guest"
+	"wslc-bridge/internal/process"
 )
 
 type dockerPortBinding struct {
@@ -309,7 +313,7 @@ var validNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 func (h *Handler) createContainer(w http.ResponseWriter, r *http.Request) {
 	var request dockerCreateRequest
 	if err := decodeRequest(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	request.Image = strings.TrimSpace(request.Image)
@@ -329,7 +333,7 @@ func (h *Handler) createContainer(w http.ResponseWriter, r *http.Request) {
 	imageInspect.ContentLength = 0
 	imageResponse, imageErr := h.doGuest(r.Context(), imageInspect)
 	if imageErr != nil {
-		writeError(w, http.StatusBadGateway, "could not verify image before create: "+imageErr.Error())
+		writeError(w, http.StatusBadGateway, "could not verify image before create: "+guest.Failure(h.guest, imageErr))
 		return
 	}
 	_ = imageResponse.Body.Close()
@@ -636,7 +640,7 @@ func (h *Handler) containerStart(w http.ResponseWriter, r *http.Request, path st
 	id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/start")
 	_, err := h.native.RunWithTimeout(r.Context(), 2*time.Minute, "container", "start", id)
 	if err != nil {
-		message := strings.ToLower(err.Error())
+		message := strings.ToLower(process.StderrOf(err))
 		if strings.Contains(message, "already running") || strings.Contains(message, "already started") {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -668,7 +672,7 @@ func (h *Handler) containerStop(w http.ResponseWriter, r *http.Request, path str
 	arguments = append(arguments, id)
 	_, err := h.native.RunWithTimeout(r.Context(), 2*time.Minute, arguments...)
 	if err != nil {
-		message := strings.ToLower(err.Error())
+		message := strings.ToLower(process.StderrOf(err))
 		if strings.Contains(message, "not running") || strings.Contains(message, "already stopped") {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -703,9 +707,39 @@ func decodeRequest(r *http.Request, destination any) error {
 	if r.Body == nil {
 		return errors.New("request body is required")
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 2<<20))
+	if err := decodeBody(r, destination); err != nil {
+		if errors.Is(err, io.EOF) {
+			return errors.New("request body is required")
+		}
+		return err
+	}
+	return nil
+}
+
+// decodeOptionalRequest decodes a body that may be absent, such as the exec start
+// options. An empty or absent body is valid there; ContentLength is not a
+// reliable signal because it is -1 for chunked requests.
+func decodeOptionalRequest(r *http.Request, destination any) error {
+	if r.Body == nil {
+		return nil
+	}
+	if err := decodeBody(r, destination); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+func decodeBody(r *http.Request, destination any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxRequestBodyBytes))
 	if err := decoder.Decode(destination); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return errRequestEntityTooLarge
+		}
 		return fmt.Errorf("decode request JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain a single JSON value")
 	}
 	return nil
 }

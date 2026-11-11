@@ -5,12 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"wslc-bridge/internal/execstore"
+	"wslc-bridge/internal/logging"
 	"wslc-bridge/internal/process"
 )
 
@@ -34,7 +36,7 @@ func (h *Handler) createExec(w http.ResponseWriter, r *http.Request, path string
 	containerID := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/exec")
 	var request execCreateRequest
 	if err := decodeRequest(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	if len(request.Cmd) == 0 || strings.TrimSpace(request.Cmd[0]) == "" {
@@ -74,11 +76,9 @@ func (h *Handler) startExec(w http.ResponseWriter, r *http.Request, path string)
 		return
 	}
 	var request execStartRequest
-	if r.Body != nil && r.ContentLength != 0 {
-		if err := decodeRequest(r, &request); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if err := decodeOptionalRequest(r, &request); err != nil {
+		writeDecodeError(w, err)
+		return
 	}
 	if request.Detach || request.Tty {
 		writeError(w, http.StatusNotImplemented, "detached and TTY exec are not supported")
@@ -91,22 +91,26 @@ func (h *Handler) startExec(w http.ResponseWriter, r *http.Request, path string)
 	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		h.execs.Fail(id)
+		h.execs.Fail(id, errors.New("HTTP connection does not support Docker exec streaming"))
 		writeError(w, http.StatusInternalServerError, "HTTP connection does not support Docker exec streaming")
 		return
 	}
 	connection, buffered, err := hijacker.Hijack()
 	if err != nil {
-		h.execs.Fail(id)
+		h.execs.Fail(id, err)
 		return
 	}
 	defer connection.Close()
-	if _, err := buffered.WriteString("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"); err != nil {
-		h.execs.Fail(id)
+	handshake := "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n"
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "tcp") {
+		handshake = "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+	}
+	if _, err := buffered.WriteString(handshake); err != nil {
+		h.execs.Fail(id, err)
 		return
 	}
 	if err := buffered.Flush(); err != nil {
-		h.execs.Fail(id)
+		h.execs.Fail(id, err)
 		return
 	}
 	stream := &dockerStreamWriter{writer: connection}
@@ -118,16 +122,29 @@ func (h *Handler) startExec(w http.ResponseWriter, r *http.Request, path string)
 	if runErr != nil {
 		var processCommandError *process.CommandError
 		if !errors.As(runErr, &processCommandError) || processCommandError.ExitCode < 0 {
-			h.execs.Fail(id)
+			logging.Errorf("exec %s on container %s failed: %v", id, record.ContainerID, runErr)
+			h.execs.Fail(id, runErr)
+			closeExecStream(connection)
 			return
 		}
 		exitCode = processCommandError.ExitCode
 	}
-	if err := buffered.Flush(); err != nil {
-		h.execs.Fail(id)
+	closeExecStream(connection)
+	if _, err := h.execs.Complete(id, exitCode); err != nil {
+		logging.Errorf("could not record the exit code for exec %s: %v", id, err)
+	}
+}
+
+// closeExecStream half-closes the hijacked connection so the client observes the
+// end of the stream instead of waiting for the whole connection to close.
+func closeExecStream(connection net.Conn) {
+	halfCloser, ok := connection.(interface{ CloseWrite() error })
+	if !ok {
 		return
 	}
-	_, _ = h.execs.Complete(id, exitCode)
+	if err := halfCloser.CloseWrite(); err != nil {
+		logging.Errorf("could not half-close the exec stream: %v", err)
+	}
 }
 
 func (h *Handler) inspectExec(w http.ResponseWriter, _ *http.Request, path string) {

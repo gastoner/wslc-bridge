@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"wslc-bridge/internal/logging"
 	"wslc-bridge/internal/process"
 	"wslc-bridge/internal/wslutil"
 )
@@ -42,22 +44,47 @@ func (c *Client) ListContainers(ctx context.Context) ([]ContainerListItem, error
 	if err != nil {
 		return nil, err
 	}
+	if result.Truncated {
+		return nil, fmt.Errorf("wslc container list output exceeded %d bytes", process.MaxOutputBytes)
+	}
 	return DecodeContainerList([]byte(wslutil.DecodeWindowsOutput(result.Stdout)))
 }
+
+var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
 
 func (c *Client) CreateContainer(ctx context.Context, args []string) (string, error) {
 	result, err := c.RunWithTimeout(ctx, 2*time.Minute, args...)
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Split(strings.TrimSpace(wslutil.DecodeWindowsOutput(result.Stdout)), "\n")
+	identifier, ok := selectContainerID(wslutil.DecodeWindowsOutput(result.Stdout))
+	if !ok {
+		return "", errors.New("wslc container create returned an empty container ID")
+	}
+	if !containerIDPattern.MatchString(identifier) {
+		logging.Errorf("wslc container create returned an unexpected container ID %q; using it unchanged", identifier)
+	}
+	return identifier, nil
+}
+
+// selectContainerID picks the container ID from wslc output. Trailing non-ID
+// lines are skipped so a warning appended to stdout cannot become the ID.
+func selectContainerID(output string) (string, bool) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	fallback := ""
 	for i := len(lines) - 1; i >= 0; i-- {
 		candidate := strings.TrimSpace(lines[i])
-		if candidate != "" {
-			return candidate, nil
+		if candidate == "" {
+			continue
+		}
+		if containerIDPattern.MatchString(candidate) {
+			return candidate, true
+		}
+		if fallback == "" {
+			fallback = candidate
 		}
 	}
-	return "", errors.New("wslc container create returned an empty container ID")
+	return fallback, fallback != ""
 }
 
 func (c *Client) PullImage(ctx context.Context, reference string) error {

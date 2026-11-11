@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="${VERSION:-0.1.1-dev}"
+VERSION="${VERSION:-0.0.1-dev}"
 COMMIT="${GIT_COMMIT:-unknown}"
 if [ "$COMMIT" = "unknown" ] && git rev-parse --short HEAD >/dev/null 2>&1; then
   COMMIT="$(git rev-parse --short HEAD)"

@@ -43,6 +43,18 @@ jobs:
           fi
           echo "bridgeVersion=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Ensure the release tag does not exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: v${{ steps.version.outputs.bridgeVersion }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --silent 2>/dev/null; then
+            echo "Tag ${RELEASE_TAG} already exists; choose a different version" >&2
+            exit 1
+          fi
+
       - name: Record the commit that is built and tagged
         id: commit
         run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
